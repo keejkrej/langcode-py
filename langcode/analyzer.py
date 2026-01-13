@@ -1,7 +1,7 @@
 """Advanced code analysis for symbol finding, type hints, and semantic understanding."""
 
 import ast
-from typing import Optional, list, dict, Any
+from typing import Optional, Any
 from pathlib import Path
 from dataclasses import dataclass
 

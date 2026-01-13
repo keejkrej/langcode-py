@@ -278,6 +278,289 @@ def analyze_code_structure(path: str) -> str:
         return f"Error analyzing code: {str(e)}"
 
 
+# Git tool schemas
+class GitStatusInput(BaseModel):
+    """Input for git status command."""
+    path: str = Field(default=".", description="Repository path")
+
+
+class GitDiffInput(BaseModel):
+    """Input for git diff command."""
+    path: str = Field(default=".", description="Repository path")
+    file: str = Field(default=None, description="Optional specific file to diff")
+    staged: bool = Field(default=False, description="Show staged changes only")
+
+
+class GitLogInput(BaseModel):
+    """Input for git log command."""
+    path: str = Field(default=".", description="Repository path")
+    limit: int = Field(default=10, description="Number of commits to show")
+    oneline: bool = Field(default=True, description="Use single-line format")
+
+
+class BashInput(BaseModel):
+    """Input for bash command execution."""
+    command: str = Field(description="The bash command to execute")
+    working_dir: str = Field(default=".", description="Working directory for command")
+    timeout: int = Field(default=30, description="Timeout in seconds")
+
+
+class FileDiffInput(BaseModel):
+    """Input for comparing two files."""
+    file1: str = Field(description="Path to first file")
+    file2: str = Field(description="Path to second file")
+    context_lines: int = Field(default=3, description="Number of context lines around changes")
+
+
+@tool(args_schema=GitStatusInput)
+def git_status(path: str = ".") -> str:
+    """Get the current git status of a repository.
+
+    Args:
+        path: Path to the git repository
+
+    Returns:
+        Git status output
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "-b"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            return f"Error: {result.stderr}"
+
+        output = result.stdout.strip()
+        if not output:
+            return "Working directory is clean"
+
+        # Parse and format the output
+        lines = output.split("\n")
+        branch_line = lines[0] if lines else ""
+        changes = lines[1:] if len(lines) > 1 else []
+
+        formatted = [f"Branch: {branch_line.replace('## ', '')}"]
+        if changes:
+            formatted.append("\nChanges:")
+            for change in changes:
+                status = change[:2]
+                filename = change[3:]
+                status_map = {
+                    "M ": "Modified (staged)",
+                    " M": "Modified (unstaged)",
+                    "MM": "Modified (staged + unstaged)",
+                    "A ": "Added",
+                    "D ": "Deleted",
+                    " D": "Deleted (unstaged)",
+                    "R ": "Renamed",
+                    "??": "Untracked",
+                }
+                status_desc = status_map.get(status, status)
+                formatted.append(f"  {status_desc}: {filename}")
+
+        return "\n".join(formatted)
+    except subprocess.TimeoutExpired:
+        return "Error: Command timed out"
+    except FileNotFoundError:
+        return "Error: git is not installed or not in PATH"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@tool(args_schema=GitDiffInput)
+def git_diff(path: str = ".", file: str = None, staged: bool = False) -> str:
+    """Show git diff for changes in the repository.
+
+    Args:
+        path: Path to the git repository
+        file: Optional specific file to diff
+        staged: Whether to show only staged changes
+
+    Returns:
+        Git diff output
+    """
+    import subprocess
+
+    try:
+        cmd = ["git", "diff"]
+        if staged:
+            cmd.append("--staged")
+        if file:
+            cmd.append("--")
+            cmd.append(file)
+
+        result = subprocess.run(
+            cmd,
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode != 0:
+            return f"Error: {result.stderr}"
+
+        output = result.stdout.strip()
+        return output if output else "No changes"
+    except subprocess.TimeoutExpired:
+        return "Error: Command timed out"
+    except FileNotFoundError:
+        return "Error: git is not installed or not in PATH"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@tool(args_schema=GitLogInput)
+def git_log(path: str = ".", limit: int = 10, oneline: bool = True) -> str:
+    """Show git commit history.
+
+    Args:
+        path: Path to the git repository
+        limit: Maximum number of commits to show
+        oneline: Use single-line format
+
+    Returns:
+        Git log output
+    """
+    import subprocess
+
+    try:
+        cmd = ["git", "log", f"-{limit}"]
+        if oneline:
+            cmd.append("--oneline")
+        else:
+            cmd.extend(["--format=%h %s (%an, %ar)"])
+
+        result = subprocess.run(
+            cmd,
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            return f"Error: {result.stderr}"
+
+        return result.stdout.strip() or "No commits found"
+    except subprocess.TimeoutExpired:
+        return "Error: Command timed out"
+    except FileNotFoundError:
+        return "Error: git is not installed or not in PATH"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@tool(args_schema=BashInput)
+def run_bash(command: str, working_dir: str = ".", timeout: int = 30) -> str:
+    """Execute a bash command safely.
+
+    Args:
+        command: The command to execute
+        working_dir: Working directory for the command
+        timeout: Maximum execution time in seconds
+
+    Returns:
+        Command output (stdout and stderr combined)
+    """
+    import subprocess
+    import shlex
+
+    # Safety: Block potentially dangerous commands
+    dangerous_patterns = [
+        "rm -rf /", "rm -rf ~", "mkfs", "dd if=",
+        ":(){", "fork bomb", ">(", "chmod -R 777 /",
+        "mv /* ", "mv / ", "curl | sh", "wget | sh",
+    ]
+
+    command_lower = command.lower()
+    for pattern in dangerous_patterns:
+        if pattern in command_lower:
+            return f"Error: Potentially dangerous command blocked: {pattern}"
+
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+
+        output = []
+        if result.stdout:
+            output.append(result.stdout)
+        if result.stderr:
+            output.append(f"[stderr]\n{result.stderr}")
+        if result.returncode != 0:
+            output.append(f"\n[exit code: {result.returncode}]")
+
+        return "\n".join(output).strip() or "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"Error: Command timed out after {timeout} seconds"
+    except Exception as e:
+        return f"Error executing command: {str(e)}"
+
+
+@tool(args_schema=FileDiffInput)
+def file_diff(file1: str, file2: str, context_lines: int = 3) -> str:
+    """Compare two files and show differences.
+
+    Args:
+        file1: Path to first file
+        file2: Path to second file
+        context_lines: Number of context lines around changes
+
+    Returns:
+        Unified diff output
+    """
+    import difflib
+
+    try:
+        path1 = Path(file1)
+        path2 = Path(file2)
+
+        if not path1.exists():
+            return f"Error: File not found: {file1}"
+        if not path2.exists():
+            return f"Error: File not found: {file2}"
+
+        with open(path1, "r", encoding="utf-8") as f:
+            lines1 = f.readlines()
+        with open(path2, "r", encoding="utf-8") as f:
+            lines2 = f.readlines()
+
+        diff = difflib.unified_diff(
+            lines1,
+            lines2,
+            fromfile=str(path1),
+            tofile=str(path2),
+            n=context_lines
+        )
+
+        result = "".join(diff)
+        return result if result else "Files are identical"
+    except Exception as e:
+        return f"Error comparing files: {str(e)}"
+
+
+# Git tools list
+GIT_TOOLS = [
+    git_status,
+    git_diff,
+    git_log,
+]
+
+# Utility tools list
+UTIL_TOOLS = [
+    run_bash,
+    file_diff,
+]
+
 # Create a list of all tools for easy registration
 CODE_TOOLS = [
     read_file,
@@ -287,3 +570,6 @@ CODE_TOOLS = [
     search_code,
     analyze_code_structure,
 ]
+
+# All tools combined
+ALL_TOOLS = CODE_TOOLS + GIT_TOOLS + UTIL_TOOLS
